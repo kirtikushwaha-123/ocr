@@ -1,0 +1,20 @@
+# PicWise requirements
+#
+# PaddleOCR / PaddlePaddle versions must be compatible with each other.
+# As of writing, the recommended stable combination is PaddleOCR 2.7.x /
+# 2.8.x with PaddlePaddle 2.6.x (CPU build). If you have a CUDA-capable
+# GPU and want GPU acceleration, install `paddlepaddle-gpu` matching your
+# CUDA version instead of `paddlepaddle` - see:
+#   https://www.paddlepaddle.org.cn/en/install/quick
+# and
+#   https://github.com/PaddlePaddle/PaddleOCR
+# for the current compatibility matrix, since these move over time.
+
+opencv-python>=4.8,<5.0
+numpy>=1.24,<2.0
+pandas>=2.0
+paddleocr>=2.7,<3.0
+paddlepaddle>=2.6,<2.7
+rapidfuzz>=3.0
+openpyxl>=3.1
+Pillow>=10.0
