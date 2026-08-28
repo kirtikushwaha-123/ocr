@@ -22,6 +22,62 @@ from detection.block_detector import detect_logical_blocks
 from detection.ocr_detector import normalize_ocr_text, find_anchor_candidates
 from detection.section_signals import classify_nutrition_row, detect_section_boundaries
 
+def split_merged_lines(lines, image_width):
+    """
+    Splits any line that contains a horizontal gap wider than the threshold.
+    """
+    split_lines = []
+    line_h = median_line_height([ln["rect"] for ln in lines]) or 20.0
+    gap_threshold = max(25.0, min(image_width * 0.05, line_h * 1.2))
+    
+    for ln in lines:
+        items = ln.get("items", [])
+        if len(items) <= 1:
+            split_lines.append(ln)
+            continue
+            
+        sorted_items = sorted(items, key=lambda it: it["rect"][0])
+        
+        current_group = [sorted_items[0]]
+        groups = [current_group]
+        
+        for it in sorted_items[1:]:
+            prev_it = current_group[-1]
+            gap = it["rect"][0] - prev_it["rect"][2]
+            if gap > gap_threshold:
+                current_group = [it]
+                groups.append(current_group)
+            else:
+                current_group.append(it)
+                
+        if len(groups) == 1:
+            split_lines.append(ln)
+        else:
+            for gp in groups:
+                merged_text = " ".join(m["text"] for m in gp)
+                merged_rect = union_rect([m["rect"] for m in gp])
+                avg_conf = float(np.mean([m.get("confidence", 0.0) for m in gp]))
+                
+                new_ln = dict(ln)
+                new_ln["text"] = merged_text
+                new_ln["rect"] = merged_rect
+                new_ln["items"] = gp
+                new_ln["confidence"] = avg_conf
+                
+                x1, y1, x2, y2 = merged_rect
+                new_ln["center"] = [float((x1 + x2) / 2.0), float((y1 + y2) / 2.0)]
+                new_ln["height"] = float(y2 - y1)
+                new_ln["width"] = float(x2 - x1)
+                
+                # Copy semantic scores if present
+                for key in ["ingredient_score", "nutrition_score", "other_score"]:
+                    if key in ln:
+                        new_ln[key] = ln[key]
+                        
+                split_lines.append(new_ln)
+                
+    return split_lines
+
 def find_ingredient_anchor_candidates(lines, top_n=None):
     """
     Finds lines that look like Ingredients headings.
@@ -38,12 +94,16 @@ def find_ingredient_anchor_candidates(lines, top_n=None):
     weak = [c for c in candidates if c["matched_anchor"] == "contains"]
     return (strong + weak)[:top_n]
 
-def expand_ingredient_region(anchor_line, all_lines, image_shape):
+def expand_ingredient_region(anchor_line, all_lines, image_shape, anchor_column_lines=None):
     """
     Expands the region from the anchor line, accepting lines based on geometry and semantics.
     """
     anchor_rect = anchor_line["rect"]
-    others = [ln for ln in all_lines if ln is not anchor_line]
+    if anchor_column_lines is not None:
+        col_set = {id(ln) for ln in anchor_column_lines}
+        others = [ln for ln in all_lines if ln is not anchor_line and id(ln) in col_set]
+    else:
+        others = [ln for ln in all_lines if ln is not anchor_line]
     ordered = sort_reading_order(others)
 
     line_h = median_line_height([ln["rect"] for ln in all_lines]) or 20.0
@@ -157,12 +217,16 @@ def score_ingredient_region(collected_lines, anchor_score, stop_reason, ingredie
         if ln.get("other_score", 0.0) > 0.7:
             contamination_penalty += 0.1
 
+    mean_ocr_confidence = float(np.mean([ln.get("confidence", 0.0) for ln in collected_lines]))
+    ocr_confidence_bonus = mean_ocr_confidence * 0.10
+
     confidence = (
         (anchor_score / 100.0) * 0.4
         + avg_ing_score * 0.25
         + line_count_bonus
         + vocab_bonus
         + boundary_bonus
+        + ocr_confidence_bonus
         - contamination_penalty
     )
     return round(float(max(0.0, min(0.98, confidence))), 3)
@@ -208,6 +272,8 @@ def detect_ingredient_region(items, image_shape, ingredient_vocab=None, debug=Fa
             "matched_items": [], "method": "none",
         }
 
+    lines = split_merged_lines(lines, image_shape[1])
+
     # 2. Score lines semantically
     lines = classify_lines(lines, ingredient_vocab)
 
@@ -218,12 +284,40 @@ def detect_ingredient_region(items, image_shape, ingredient_vocab=None, debug=Fa
     anchor_candidates = find_ingredient_anchor_candidates(lines)
     scored_candidates = []
 
+    from detection.geometry import cluster_into_columns, find_column_for_line
+    h, w = image_shape[:2]
+    line_h = median_line_height([ln["rect"] for ln in lines]) or 20.0
+    adaptive_ratio = min(config.COLUMN_GAP_MIN_WIDTH_RATIO, (line_h * 0.8) / w)
+
     for cand in anchor_candidates:
         anchor_line = cand["line"]
         anchor_text = cand["matched_anchor"]
         anchor_score = cand["score"]
 
-        bbox, collected, debug_info = expand_ingredient_region(anchor_line, lines, image_shape)
+        # Filter window lines near the anchor to avoid global header/footer connection
+        y_min = anchor_line["rect"][1] - line_h * 0.5
+        y_max = anchor_line["rect"][1] + line_h * 6.0
+        window_lines = [ln for ln in lines if y_min <= ln["rect"][1] <= y_max]
+
+        columns = cluster_into_columns(window_lines, w, min_gap_ratio=adaptive_ratio)
+        anchor_window_col = find_column_for_line(anchor_line, columns)
+
+        if anchor_window_col:
+            col_left = min(ln["rect"][0] for ln in anchor_window_col)
+            col_right = max(ln["rect"][2] for ln in anchor_window_col)
+            
+            # Filter all candidate lines on the page to those matching the column's horizontal span
+            anchor_column_lines = []
+            for ln in lines:
+                cx = (ln["rect"][0] + ln["rect"][2]) / 2.0
+                if col_left - 10 <= cx <= col_right + 10:
+                    anchor_column_lines.append(ln)
+        else:
+            anchor_column_lines = lines
+
+        bbox, collected, debug_info = expand_ingredient_region(
+            anchor_line, lines, image_shape, anchor_column_lines=anchor_column_lines
+        )
         confidence = score_ingredient_region(
             collected, anchor_score, debug_info["stop_reason"], ingredient_vocab
         )

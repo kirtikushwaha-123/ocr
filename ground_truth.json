@@ -1,0 +1,42 @@
+{
+  "product.png": {
+    "ingredients": [375.0, 541.0, 865.0, 634.0],
+    "nutrition": [70.0, 559.0, 957.0, 1278.0]
+  },
+  "product1.jpeg": {
+    "ingredients": [56.0, 241.0, 281.0, 410.0],
+    "nutrition": [56.0, 418.0, 281.0, 677.0]
+  },
+  "product2.png": {
+    "ingredients": [67.0, 340.0, 536.0, 464.0],
+    "nutrition": null
+  },
+  "product3.jpg": {
+    "ingredients": [197.0, 578.0, 1056.0, 870.0],
+    "nutrition": [10.0, 589.0, 794.0, 889.0]
+  },
+  "product4.png": {
+    "ingredients": [364.0, 483.0, 662.0, 723.0],
+    "nutrition": [361.0, 292.0, 663.0, 569.0]
+  },
+  "product5.jpg": {
+    "ingredients": [535.0, 70.0, 902.0, 377.0],
+    "nutrition": [75.0, 476.0, 919.0, 615.0]
+  },
+  "product6.jpg": {
+    "ingredients": [43.0, 18.0, 609.0, 243.0],
+    "nutrition": null
+  },
+  "product7.jpg": {
+    "ingredients": [69.0, 124.0, 498.0, 301.0],
+    "nutrition": [70.0, 312.0, 536.0, 403.0]
+  },
+  "product8.jpg": {
+    "ingredients": [115.0, 264.0, 567.0, 489.0],
+    "nutrition": [129.0, 511.0, 559.0, 881.0]
+  },
+  "product9.jpg": {
+    "ingredients": [358.0, 336.0, 657.0, 447.0],
+    "nutrition": null
+  }
+}

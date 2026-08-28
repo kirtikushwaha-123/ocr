@@ -3,13 +3,13 @@ detection/tight_roi.py
 
 Refines raw region candidates by applying semantic line filtering, boundary
 detection, and calculating the tight union of accepted lines. Applies a small
-configurable margin and clips to image boundaries to produce the final crop box.
+padding relative to font size (median line height) and clips to image boundaries
+to produce the final crop box.
 """
 
-import config
-from detection.geometry import union_rect, validate_region, clip_rect
+from detection.geometry import union_rect, validate_region, clip_rect, median_line_height
 
-def _refine_roi(lines, image_shape, padding_ratio_x, padding_ratio_y, min_score_key=None, min_score_val=0.1):
+def _refine_roi(lines, image_shape, min_score_key=None, min_score_val=0.1):
     """
     Core ROI refinement utility.
     """
@@ -33,10 +33,14 @@ def _refine_roi(lines, image_shape, padding_ratio_x, padding_ratio_y, min_score_
     if not union_box:
         return None
 
-    # 3. Apply small configurable margin
-    h, w = image_shape[:2]
-    pad_x = int(round(w * padding_ratio_x))
-    pad_y = int(round(h * padding_ratio_y))
+    # 3. Apply margin based on median line height (font size)
+    # Derive line height from all candidate lines
+    line_rects = [ln["rect"] for ln in lines]
+    line_h = median_line_height(line_rects)
+
+    # pad_x = 0.5 * median_line_height, pad_y = 0.3 * median_line_height
+    pad_x = int(round(0.5 * line_h))
+    pad_y = int(round(0.3 * line_h))
 
     x1, y1, x2, y2 = union_box
     x1 -= pad_x
@@ -55,8 +59,6 @@ def refine_ingredient_roi(lines, image_shape):
     return _refine_roi(
         lines,
         image_shape,
-        padding_ratio_x=config.REGION_PADDING_RATIO_X,
-        padding_ratio_y=config.REGION_PADDING_RATIO_Y,
         min_score_key="ingredient_score",
         min_score_val=0.08
     )
@@ -68,8 +70,6 @@ def refine_nutrition_roi(lines, image_shape):
     return _refine_roi(
         lines,
         image_shape,
-        padding_ratio_x=config.REGION_PADDING_RATIO_X,
-        padding_ratio_y=config.REGION_PADDING_RATIO_Y,
         min_score_key="nutrition_score",
         min_score_val=0.08
     )

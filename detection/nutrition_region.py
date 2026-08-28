@@ -266,12 +266,16 @@ def score_nutrition_region(collected_lines, anchor_score, stop_reason, ingredien
         if ln.get("other_score", 0.0) > 0.75:
             contamination_penalty += 0.1
 
+    mean_ocr_confidence = float(np.mean([ln.get("confidence", 0.0) for ln in collected_lines]))
+    ocr_confidence_bonus = mean_ocr_confidence * 0.10
+
     confidence = (
         (anchor_score / 100.0) * 0.4
         + avg_nut_score * 0.25
         + line_bonus
         + term_bonus
         + boundary_bonus
+        + ocr_confidence_bonus
         - contamination_penalty
     )
     return round(float(max(0.0, min(0.98, confidence))), 3), sorted(matched_terms)

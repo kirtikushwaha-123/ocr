@@ -37,10 +37,9 @@ def classify_nutrition_row(line_text):
         }
 
     A line is a STRONG nutrition row only when it has a nutrient keyword
-    AND a number+unit pattern (e.g. "Protein 8 g"), or a nutrient keyword
-    alone when the line is short (a bare row label like "Protein" with
-    its value merged separately). This avoids false positives on
-    marketing copy like "HIGH PROTEIN" (no number+unit -> not strong).
+    AND a number+unit pattern (e.g. "Protein 8 g") where the number is after
+    and close to the keyword, or a nutrient keyword alone when the line is
+    short and the keyword is the leading token. This avoids false positives.
     """
     norm = normalize_ocr_text(line_text)
     keyword_hits = [kw for kw in config.NUTRIENT_KEYWORDS if kw in norm]
@@ -48,11 +47,28 @@ def classify_nutrition_row(line_text):
 
     is_strong = False
     if keyword_hits and has_number_unit:
-        is_strong = True
+        # Require the number-unit pattern to be after and close to the keyword (within 15 chars)
+        for kw in keyword_hits:
+            for m_kw in re.finditer(re.escape(kw), norm):
+                kw_end = m_kw.end()
+                for m_unit in _NUTRITION_UNIT_RE.finditer(norm):
+                    unit_start = m_unit.start()
+                    if unit_start >= kw_end and (unit_start - kw_end) <= 15:
+                        is_strong = True
+                        break
+                if is_strong:
+                    break
+            if is_strong:
+                break
     elif keyword_hits and len(norm) <= 24:
-        # short bare label like "Protein" or "Total Fat" - plausible row
-        # header even without its own number/unit box merged in.
-        is_strong = True
+        # Require the keyword to be the line's leading token (ignoring prefix punctuation/noise)
+        is_leading = False
+        for kw in keyword_hits:
+            if re.match(r'^[-\s:]*' + re.escape(kw) + r'\b', norm):
+                is_leading = True
+                break
+        if is_leading:
+            is_strong = True
 
     return {
         "keyword_hits": keyword_hits,
