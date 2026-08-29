@@ -84,13 +84,32 @@ def detect_logical_blocks(lines, image_shape, ingredient_vocab=None):
         combined_text = " ".join(ln["text"] for ln in members_sorted)
         merged_rect = union_rect([ln["rect"] for ln in members_sorted])
 
+        # Aggregate line scores
+        scores = {
+            "ingredients": 0.0, "nutrition": 0.0, "allergen": 0.0, "manufacturer": 0.0,
+            "storage": 0.0, "directions": 0.0, "regulatory": 0.0, "product_information": 0.0, "other": 0.0
+        }
+        for ln in members_sorted:
+            ln_scores = ln.get("scores", {})
+            for k in scores:
+                scores[k] += ln_scores.get(k, 0.0)
+        
+        for k in scores:
+            scores[k] = round(float(scores[k] / len(members_sorted)), 3)
+            
+        predicted_class = max(scores, key=scores.get)
+        if max(scores.values()) == 0.0:
+            predicted_class = "other"
+
         block_type = _classify_block_type(combined_text, members_sorted, ingredient_vocab)
 
         blocks.append({
             "type": block_type,
             "lines": members_sorted,
             "rect": merged_rect,
-            "text": combined_text
+            "text": combined_text,
+            "scores": scores,
+            "predicted_class": predicted_class
         })
 
     # Sort blocks top-to-bottom

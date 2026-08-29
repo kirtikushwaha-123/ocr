@@ -279,7 +279,7 @@ def run_pipeline(image_path, output_dir, domain_arg="auto", test_mode=False, kb=
     best_nutrition_variant = None
     if domain == "food" and nut_ocr:
         best_nutrition_variant = nut_ocr.get("best_variant")
-        nutrition_output = parse_nutrition(nut_ocr.get("best_text", ""))
+        nutrition_output = parse_nutrition(nut_ocr.get("best_text", ""), nut_ocr)
 
     _log("[9/9] Drawing visualization + writing outputs")
     vis = draw_regions(

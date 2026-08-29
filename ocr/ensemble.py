@@ -114,11 +114,67 @@ def run_variant_ocr(variants, mode="generic"):
           }
         }
     """
+    from preprocessing.image_utils import check_image_quality
+
     all_results = {}
     best_variant = None
     best_score = float("-inf")
 
-    for name, img in variants.items():
+    short_circuit_conf = getattr(config, "ENSEMBLE_SHORT_CIRCUIT_CONFIDENCE", 0.88)
+
+    # 1. Run the "original" variant first
+    original_img = variants.get("original")
+    if original_img is not None:
+        items = run_ocr(original_img)
+        score, text, conf = score_ocr_items(items, mode)
+        all_results["original"] = {
+            "score": score,
+            "text": text,
+            "confidence": conf,
+            "items": items,
+        }
+        best_score = score
+        best_variant = "original"
+        
+        # If the confidence is high, short-circuit
+        if conf >= short_circuit_conf:
+            return {
+                "best_variant": "original",
+                "best_score": score,
+                "best_text": text,
+                "best_confidence": conf,
+                "best_items": items,
+                "all_variants": all_results,
+            }
+
+    # 2. Decide other variants to run based on quality checks of "original"
+    if original_img is not None:
+        try:
+            quality = check_image_quality(original_img)
+        except Exception:
+            quality = None
+    else:
+        quality = None
+
+    to_run = []
+    if quality:
+        if quality.get("is_blurry", False):
+            # focus on sharpening variants
+            to_run = ["sharpened", "sharpened_threshold"]
+        elif quality.get("is_too_dark", False) or quality.get("contrast_std", 100.0) < 45.0:
+            # focus on contrast enhancement and thresholding variants
+            to_run = ["clahe", "adaptive_threshold", "denoised_clahe"]
+        else:
+            # balanced subset
+            to_run = ["clahe", "sharpened", "adaptive_threshold"]
+    else:
+        # fallback to all variants
+        to_run = [k for k in variants.keys() if k != "original"]
+
+    for name in to_run:
+        if name in all_results or name not in variants:
+            continue
+        img = variants[name]
         items = run_ocr(img)
         score, text, conf = score_ocr_items(items, mode)
         all_results[name] = {

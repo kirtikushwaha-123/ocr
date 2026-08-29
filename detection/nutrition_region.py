@@ -99,6 +99,101 @@ def _expand_directional(seed_rect, band, ordered_lines, line_h, max_gap, band_to
 
     return collected, rejected, stop_reason, (band_left, band_right)
 
+def cluster_semantic_lines_nutrition(lines, max_gap_y, band_tolerance):
+    """
+    Groups lines with high nutrition probability into spatial clusters.
+    """
+    candidates = [ln for ln in lines if ln.get("scores", {}).get("nutrition", 0.0) >= 0.20]
+    if not candidates:
+        return []
+        
+    n = len(candidates)
+    parent = list(range(n))
+    
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+        
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+            
+    for i in range(n):
+        rect_i = candidates[i]["rect"]
+        for j in range(i + 1, n):
+            rect_j = candidates[j]["rect"]
+            
+            # Check vertical distance
+            v_gap = vertical_distance(rect_i, rect_j)
+            if v_gap > max_gap_y:
+                continue
+                
+            # Check horizontal alignment
+            left_close = abs(rect_i[0] - rect_j[0]) <= band_tolerance
+            overlap = horizontal_overlap_ratio(rect_i, rect_j) >= config.REGION_BAND_OVERLAP_MIN_RATIO
+            
+            if left_close or overlap:
+                union(i, j)
+                
+    groups = {}
+    for i in range(n):
+        root = find(i)
+        groups.setdefault(root, []).append(candidates[i])
+        
+    clusters = []
+    for g in groups.values():
+        clusters.append(sorted(g, key=lambda ln: (ln["rect"][1], ln["rect"][0])))
+    return clusters
+
+
+def _spatial_semantic_fallback_candidate_nutrition(lines, max_gap_y, band_tolerance, image_shape):
+    """
+    Fallback using spatial-semantic clustering when no anchor is found.
+    """
+    clusters = cluster_semantic_lines_nutrition(lines, max_gap_y, band_tolerance)
+    if not clusters:
+        return None
+        
+    scored = []
+    for c_lines in clusters:
+        if len(c_lines) < 2:
+            continue
+            
+        matched_terms = set()
+        for ln in c_lines:
+            matched_terms.update(classify_nutrition_row(ln["text"])["keyword_hits"])
+            
+        # Require at least 2 distinct nutrient keyword hits to be a valid fallback table
+        if len(matched_terms) < 2:
+            continue
+            
+        avg_nut = float(np.mean([ln.get("scores", {}).get("nutrition", 0.0) for ln in c_lines]))
+        if avg_nut < 0.35:
+            continue
+            
+        confidence = min(0.75, 0.3 + 0.45 * avg_nut)
+        if confidence < 0.55:
+            continue
+            
+        bbox = union_rect([ln["rect"] for ln in c_lines])
+        
+        scored.append({
+            "bbox": bbox,
+            "confidence": round(float(confidence), 3),
+            "anchor": None,
+            "matched_items": c_lines,
+            "matched_terms": sorted(matched_terms),
+            "method": "spatial_semantic_fallback",
+            "debug": {"num_lines_collected": len(c_lines), "stop_reason": "spatial_clustering"}
+        })
+        
+    scored.sort(key=lambda x: x["confidence"], reverse=True)
+    return scored[0] if scored else None
+
+
 def expand_nutrition_region(anchor_line, all_lines, image_shape, ingredient_vocab=None):
     """
     Expands the nutrition region from the anchor heading.
@@ -324,6 +419,9 @@ def detect_nutrition_region(items, image_shape, ingredient_vocab=None, debug=Fal
             "bbox": None, "confidence": 0.0, "anchor": None,
             "matched_items": [], "matched_terms": [], "method": "none",
         }
+    line_h = median_line_height([ln["rect"] for ln in lines]) or 20.0
+    max_gap_y = line_h * config.REGION_EXPANSION_MAX_LINE_GAP_FACTOR
+    band_tolerance = line_h * config.REGION_BAND_LEFT_TOLERANCE_FACTOR
 
     # 2. Score lines semantically
     lines = classify_lines(lines, ingredient_vocab)
@@ -368,6 +466,11 @@ def detect_nutrition_region(items, image_shape, ingredient_vocab=None, debug=Fal
     fallback = detect_nutrition_rows(lines, image_shape, ingredient_vocab=ingredient_vocab)
     if fallback is not None:
         scored_candidates.append(fallback)
+
+    # 7. Fallback via spatial-semantic clustering
+    spatial_candidate = _spatial_semantic_fallback_candidate_nutrition(lines, max_gap_y, band_tolerance, image_shape)
+    if spatial_candidate is not None:
+        scored_candidates.append(spatial_candidate)
 
     if not scored_candidates:
         return {

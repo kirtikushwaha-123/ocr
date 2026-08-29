@@ -144,13 +144,29 @@ def save_image(image, path):
 def check_image_quality(image):
     """
     Lightweight quality check used before heavy processing. Returns a dict
-    with blur score (variance of Laplacian), brightness, and simple flags.
+    with blur score (variance of Laplacian), brightness, contrast, glare,
+    shadow, and simple flags.
     This does not block the pipeline - it only informs downstream decisions
     and is written to result.json for debugging.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
     brightness = float(np.mean(gray))
+    contrast = float(np.std(gray))
+    
+    # Glare: fraction of pixels with value > 250
+    glare_score = float(np.mean(gray > 250))
+    
+    # Shadow: standard deviation of local 4x4 block means
+    h, w = gray.shape
+    bh, bw = max(2, h // 4), max(2, w // 4)
+    block_means = []
+    for r in range(4):
+        for c in range(4):
+            block = gray[r*bh:(r+1)*bh, c*bw:(c+1)*bw]
+            if block.size > 0:
+                block_means.append(np.mean(block))
+    shadow_score = float(np.std(block_means)) if block_means else 0.0
 
     is_blurry = laplacian_var < 60.0
     is_too_dark = brightness < 40.0
@@ -159,6 +175,9 @@ def check_image_quality(image):
     return {
         "laplacian_variance": float(laplacian_var),
         "brightness_mean": brightness,
+        "contrast_std": contrast,
+        "glare_ratio": glare_score,
+        "shadow_std": shadow_score,
         "is_blurry": bool(is_blurry),
         "is_too_dark": bool(is_too_dark),
         "is_too_bright": bool(is_too_bright),

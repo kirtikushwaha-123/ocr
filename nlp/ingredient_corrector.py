@@ -94,6 +94,9 @@ class IngredientCorrector:
         Returns:
             list of dicts containing:
                 "ocr_text": original OCR token
+                "normalized_text": normalized OCR token
+                "corrected_ingredient": canonical KB name or None
+                "match_confidence": matching score (0.0 to 1.0) or None
                 "matched_name": canonical KB name or None
                 "confidence": matching score (0.0 to 1.0) or None
         """
@@ -102,15 +105,26 @@ class IngredientCorrector:
 
         if not self.kb:
             # Fallback if KB is not provided
-            return [{"ocr_text": tok, "matched_name": None, "confidence": None} for tok in tokens]
+            return [{
+                "ocr_text": tok,
+                "normalized_text": normalize_ocr_text(tok),
+                "corrected_ingredient": None,
+                "match_confidence": None,
+                "matched_name": None,
+                "confidence": None
+            } for tok in tokens]
 
         matched_kb_items = self.kb.match_ingredient_list(tokens, domain=domain)
         
         for tok, m in zip(tokens, matched_kb_items):
+            sim = m["similarity"] / 100.0 if m["matched_name"] else None
             results.append({
                 "ocr_text": tok,
+                "normalized_text": normalize_ocr_text(tok),
+                "corrected_ingredient": m["matched_name"],
+                "match_confidence": sim,
                 "matched_name": m["matched_name"],
-                "confidence": m["similarity"] / 100.0 if m["matched_name"] else None
+                "confidence": sim
             })
 
         return results
