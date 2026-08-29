@@ -104,8 +104,10 @@ def reconcile_regions(ingredient_result, nutrition_result, image_shape, ingredie
 
     # Recompute Ingredients Box
     if final_ing_lines:
-        new_bbox = refine_ingredient_roi(final_ing_lines, image_shape)
+        refine_res = refine_ingredient_roi(final_ing_lines, image_shape)
+        new_bbox = refine_res["refined_bbox"]
         new_ingredient_result["bbox"] = new_bbox
+        new_ingredient_result["refinement"] = refine_res
         new_ingredient_result["matched_items"] = final_ing_lines
         new_ingredient_result["confidence"] = round(max(0.05, ingredient_result["confidence"] - 0.02), 3)
     else:
@@ -115,8 +117,10 @@ def reconcile_regions(ingredient_result, nutrition_result, image_shape, ingredie
 
     # Recompute Nutrition Box
     if final_nut_lines:
-        new_bbox = refine_nutrition_roi(final_nut_lines, image_shape)
+        refine_res = refine_nutrition_roi(final_nut_lines, image_shape)
+        new_bbox = refine_res["refined_bbox"]
         new_nutrition_result["bbox"] = new_bbox
+        new_nutrition_result["refinement"] = refine_res
         new_nutrition_result["matched_items"] = final_nut_lines
         new_nutrition_result["confidence"] = round(max(0.05, nutrition_result["confidence"] - 0.02), 3)
     else:

@@ -19,7 +19,7 @@ from detection.geometry import (
 from detection.line_builder import reconstruct_lines
 from detection.line_classifier import classify_lines
 from detection.block_detector import detect_logical_blocks
-from detection.ocr_detector import normalize_ocr_text, find_anchor_candidates
+from detection.ocr_detector import normalize_ocr_text, find_anchor_candidates, best_anchor_match
 from detection.section_signals import classify_nutrition_row, detect_section_boundaries
 
 def split_merged_lines(lines, image_width):
@@ -343,33 +343,72 @@ def _vocabulary_fallback_candidate(blocks, ingredient_vocab):
     scored.sort(key=lambda x: x["confidence"], reverse=True)
     return scored[0] if scored else None
 
-def detect_ingredient_region(items, image_shape, ingredient_vocab=None, debug=False):
+def detect_ingredient_region(layout_analysis, image_shape, ingredient_vocab=None, debug=False):
     """
-    Main entry point for Ingredients Region Detection.
+    Main entry point for Ingredients Region Detection. Supports consuming unified document layout analysis.
     """
+    # 1. Backward-compatibility / Direct call support
+    if not isinstance(layout_analysis, dict) or "section_candidates" not in layout_analysis:
+        from detection.document_layout import analyze_document
+        layout_analysis = analyze_document(layout_analysis, image_shape, ingredient_vocab)
+
     include_debug = debug or config.DEBUG_REGION_DETECTION
 
-    # 1. Reconstruct logical lines
-    lines = reconstruct_lines(items, image_shape)
+    # Find candidates from layout_analysis candidates
+    candidates = [c for c in layout_analysis["section_candidates"] if c["type"] == "ingredients"]
+    
+    # Target high-quality primary candidates first (semantic/logical blocks/clusters)
+    primary_cands = [c for c in candidates if c["final_score"] >= 0.70]
+    
+    if primary_cands:
+        best_cand = primary_cands[0]
+        # Construct winning response
+        result = {
+            "bbox": best_cand["bbox"],
+            "confidence": best_cand["final_score"],
+            "anchor": None,
+            "matched_items": best_cand["lines"],
+            "method": best_cand["method"],
+            "debug": {
+                "final_score": best_cand["final_score"],
+                "semantic_score": best_cand["semantic_score"],
+                "vocabulary_score": best_cand["vocabulary_score"],
+                "heading_score": best_cand["heading_score"],
+                "spatial_score": best_cand["spatial_score"],
+                "ocr_score": best_cand["ocr_score"],
+                "all_candidate_scores": [
+                    {"method": c["method"], "confidence": c["final_score"]} for c in candidates
+                ]
+            }
+        }
+        # Resolve anchor text if heading matched
+        if best_cand["heading_score"] > 0.0:
+            for ln in best_cand["lines"]:
+                matched, _ = best_anchor_match(ln["text"], config.ALL_INGREDIENT_ANCHORS)
+                if matched:
+                    result["anchor"] = ln["text"]
+                    break
+
+        best_bbox = validate_region(result["bbox"], image_shape)
+        result["bbox"] = best_bbox
+        
+        if not include_debug:
+            result.pop("debug", None)
+            
+        return result
+
+    # 2. Legacy fallback if no strong layout candidates found
+    lines = layout_analysis["lines"]
     if not lines:
         return {
             "bbox": None, "confidence": 0.0, "anchor": None,
             "matched_items": [], "method": "none",
         }
 
-    lines = split_merged_lines(lines, image_shape[1])
-
-    # 2. Score lines semantically
-    lines = classify_lines(lines, ingredient_vocab)
-
-    # 3. Detect logical blocks
-    blocks = detect_logical_blocks(lines, image_shape, ingredient_vocab)
-
-    # 4. Heading-driven candidates
+    blocks = layout_analysis["blocks"]
     anchor_candidates = find_ingredient_anchor_candidates(lines)
     scored_candidates = []
 
-    from detection.geometry import cluster_into_columns, find_column_for_line
     h, w = image_shape[:2]
     line_h = median_line_height([ln["rect"] for ln in lines]) or 20.0
     max_gap_y = line_h * config.REGION_EXPANSION_MAX_LINE_GAP_FACTOR
@@ -381,11 +420,12 @@ def detect_ingredient_region(items, image_shape, ingredient_vocab=None, debug=Fa
         anchor_text = cand["matched_anchor"]
         anchor_score = cand["score"]
 
-        # Filter window lines near the anchor to avoid global header/footer connection
+        # Filter window lines near the anchor
         y_min = anchor_line["rect"][1] - line_h * 0.5
         y_max = anchor_line["rect"][1] + line_h * 6.0
         window_lines = [ln for ln in lines if y_min <= ln["rect"][1] <= y_max]
 
+        from detection.geometry import cluster_into_columns, find_column_for_line
         columns = cluster_into_columns(window_lines, w, min_gap_ratio=adaptive_ratio)
         anchor_window_col = find_column_for_line(anchor_line, columns)
 
@@ -393,7 +433,6 @@ def detect_ingredient_region(items, image_shape, ingredient_vocab=None, debug=Fa
             col_left = min(ln["rect"][0] for ln in anchor_window_col)
             col_right = max(ln["rect"][2] for ln in anchor_window_col)
             
-            # Filter all candidate lines on the page to those matching the column's horizontal span
             anchor_column_lines = []
             for ln in lines:
                 cx = (ln["rect"][0] + ln["rect"][2]) / 2.0
@@ -420,34 +459,30 @@ def detect_ingredient_region(items, image_shape, ingredient_vocab=None, debug=Fa
             "debug": debug_info,
         })
 
-    # 5. Block/Vocabulary fallback candidate
-    vocab_candidate = _vocabulary_fallback_candidate(blocks, ingredient_vocab)
-    if vocab_candidate is not None:
-        scored_candidates.append(vocab_candidate)
-
-    # 6. Spatial semantic clustering fallback candidate
-    spatial_candidate = _spatial_semantic_fallback_candidate(lines, max_gap_y, band_tolerance, image_shape)
-    if spatial_candidate is not None:
-        scored_candidates.append(spatial_candidate)
+    # Add other layout candidates with lower confidence
+    for c in candidates:
+        scored_candidates.append({
+            "bbox": c["bbox"],
+            "confidence": c["final_score"],
+            "anchor": None,
+            "matched_items": c["lines"],
+            "method": c["method"],
+            "debug": {"final_score": c["final_score"]}
+        })
 
     if not scored_candidates:
         return {
-            "bbox": None,
-            "confidence": 0.0,
-            "anchor": None,
-            "matched_items": [],
-            "method": "none",
+            "bbox": None, "confidence": 0.0, "anchor": None,
+            "matched_items": [], "method": "none",
         }
 
-    # Pick the highest confidence candidate
     scored_candidates.sort(key=lambda c: c["confidence"], reverse=True)
     best = scored_candidates[0]
-
-    # Validate region coordinates
     best_bbox = validate_region(best["bbox"], image_shape)
     best["bbox"] = best_bbox
 
     if include_debug:
+        best["debug"] = best.get("debug", {})
         best["debug"]["all_candidate_scores"] = [
             {"method": c["method"], "anchor": c["anchor"], "confidence": c["confidence"]}
             for c in scored_candidates

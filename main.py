@@ -143,7 +143,7 @@ def run_pipeline(image_path, output_dir, domain_arg="auto", test_mode=False, kb=
     working_image = packet_crop if packet_confidence >= config.PACKET_MIN_CONFIDENCE_TO_CROP else normalized
 
     _log("[4/9] Running full-image PaddleOCR")
-    all_items = run_full_image_ocr(working_image)
+    all_items = run_full_image_ocr(working_image, quality=quality)
 
 
 
@@ -207,13 +207,25 @@ def run_pipeline(image_path, output_dir, domain_arg="auto", test_mode=False, kb=
 
     ingredient_vocab = kb.get_ingredient_names(domain=domain)
 
+    _log("[4.5/9] Running Unified Document Layout Analysis")
+    from detection.document_layout import analyze_document
+    layout_analysis = analyze_document(all_items, working_image.shape, ingredient_vocab=ingredient_vocab)
+    _log(
+        f"      Unified Layout Analysis: {len(layout_analysis['lines'])} lines, "
+        f"{len(layout_analysis['columns'])} columns, "
+        f"{len(layout_analysis['blocks'])} blocks, "
+        f"{len(layout_analysis['semantic_clusters'])} clusters"
+    )
+
     _log("[5/9] Detecting Ingredients region")
     ingredient_result = detect_ingredient_region(
-        all_items, working_image.shape, ingredient_vocab=ingredient_vocab, debug=test_mode
+        layout_analysis, working_image.shape, ingredient_vocab=ingredient_vocab, debug=test_mode
     )
-    # Refine ROI to generate tight bbox with margin
+    # Refine ROI conservatively using structural information
     from detection.tight_roi import refine_ingredient_roi, refine_nutrition_roi
-    ingredient_result["bbox"] = refine_ingredient_roi(ingredient_result.get("matched_items", []), working_image.shape)
+    ing_refinement = refine_ingredient_roi(ingredient_result, working_image.shape)
+    ingredient_result["bbox"] = ing_refinement["refined_bbox"]
+    ingredient_result["refinement"] = ing_refinement
     _log(
         f"      Ingredients bbox={ingredient_result['bbox']} "
         f"confidence={ingredient_result['confidence']} "
@@ -227,10 +239,12 @@ def run_pipeline(image_path, output_dir, domain_arg="auto", test_mode=False, kb=
     if domain == "food":
         _log("[6/9] Detecting Nutrition region")
         nutrition_result = detect_nutrition_region(
-            all_items, working_image.shape, ingredient_vocab=ingredient_vocab, debug=test_mode
+            layout_analysis, working_image.shape, ingredient_vocab=ingredient_vocab, debug=test_mode
         )
-        # Refine ROI to generate tight bbox with margin
-        nutrition_result["bbox"] = refine_nutrition_roi(nutrition_result.get("matched_items", []), working_image.shape)
+        # Refine ROI conservatively using structural information
+        nut_refinement = refine_nutrition_roi(nutrition_result, working_image.shape)
+        nutrition_result["bbox"] = nut_refinement["refined_bbox"]
+        nutrition_result["refinement"] = nut_refinement
         _log(
             f"      Nutrition bbox={nutrition_result['bbox']} "
             f"confidence={nutrition_result['confidence']} "
@@ -242,6 +256,38 @@ def run_pipeline(image_path, output_dir, domain_arg="auto", test_mode=False, kb=
         )
     else:
         _log("[6/9] Skipping Nutrition detection (domain=personal_care)")
+
+    # Print behavioral debugging showing candidates list (Phase 10)
+    _log("\n========== DOCUMENT ANALYSIS DEBUG ==========")
+    _log(f"Lines: {len(layout_analysis['lines'])}")
+    _log(f"Columns: {len(layout_analysis['columns'])}")
+    _log(f"Blocks: {len(layout_analysis['blocks'])}")
+    _log(f"Semantic Clusters: {len(layout_analysis['semantic_clusters'])}")
+    _log("\nINGREDIENT CANDIDATES:")
+    ing_cands = [c for c in layout_analysis["section_candidates"] if c["type"] == "ingredients"]
+    for idx, c in enumerate(ing_cands[:5]):
+        _log(f"  {idx+1}. method: {c['method']}, score: {c['final_score']}")
+    _log(f"FINAL INGREDIENT: method: {ingredient_result['method']}, score: {ingredient_result['confidence']}")
+    
+    if domain == "food":
+        _log("\nNUTRITION CANDIDATES:")
+        nut_cands = [c for c in layout_analysis["section_candidates"] if c["type"] == "nutrition"]
+        for idx, c in enumerate(nut_cands[:5]):
+            _log(f"  {idx+1}. method: {c['method']}, score: {c['final_score']}")
+        _log(f"FINAL NUTRITION: method: {nutrition_result['method']}, score: {nutrition_result['confidence']}")
+    _log("=============================================\n")
+
+    # Generate optional debug visual files if test_mode or DEBUG mode is enabled (Phase 11)
+    if test_mode or config.DEBUG_REGION_DETECTION:
+        _log("      Generating visual debugging images in stages/layout")
+        from visualization.draw_layout_debug import draw_layout_debug
+        draw_layout_debug(
+            working_image,
+            layout_analysis,
+            ingredient_result,
+            nutrition_result,
+            os.path.join(output_dir, "stages", "layout")
+        )
 
     _log("[7/9] Cropping + preprocessing + re-OCR'ing Ingredients ROI")
     ing_raw_crop, ing_best_img, ing_ocr = process_region(

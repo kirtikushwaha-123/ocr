@@ -294,12 +294,40 @@ def enrich_items(raw_items):
     return enriched
 
 
-def run_full_image_ocr(image):
+def run_full_image_ocr(image, quality=None):
     """
     Runs OCR on the full (already normalized/resized) image and returns
     the enriched item list.
+    Evaluates OCR confidence and runs fallbacks on preprocessed variants if quality is poor.
     """
+    import numpy as np
     raw_items = run_ocr(image)
+    
+    avg_conf = float(np.mean([it.get("confidence", 0.0) for it in raw_items])) if raw_items else 0.0
+    
+    if avg_conf < 0.82:
+        from preprocessing.image_utils import check_image_quality
+        from preprocessing.enhancement import preprocess_roi
+        
+        if quality is None:
+            quality = check_image_quality(image)
+            
+        if quality.get("is_blurry") or quality.get("contrast_std", 50.0) < 35.0 or quality.get("is_too_dark"):
+            variants = preprocess_roi(image)
+            best_variant_img = None
+            if quality.get("is_blurry") and "sharpen" in variants:
+                best_variant_img = variants["sharpen"]
+            elif (quality.get("contrast_std", 50.0) < 35.0 or quality.get("is_too_dark")) and "clahe" in variants:
+                best_variant_img = variants["clahe"]
+            elif "adaptive_thresh" in variants:
+                best_variant_img = variants["adaptive_thresh"]
+                
+            if best_variant_img is not None:
+                fallback_items = run_ocr(best_variant_img)
+                fallback_conf = float(np.mean([it.get("confidence", 0.0) for it in fallback_items])) if fallback_items else 0.0
+                if fallback_conf > avg_conf:
+                    raw_items = fallback_items
+                    
     return enrich_items(raw_items)
 
 

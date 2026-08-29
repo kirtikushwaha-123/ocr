@@ -22,7 +22,7 @@ from detection.geometry import (
 from detection.line_builder import reconstruct_lines
 from detection.line_classifier import classify_lines
 from detection.block_detector import detect_logical_blocks
-from detection.ocr_detector import normalize_ocr_text, find_anchor_candidates
+from detection.ocr_detector import normalize_ocr_text, find_anchor_candidates, best_anchor_match
 from detection.section_signals import classify_nutrition_row, classify_ingredient_line, detect_section_boundaries
 
 def find_nutrition_anchor_candidates(lines, top_n=None):
@@ -406,14 +406,66 @@ def _vocabulary_fallback_candidate_v2(blocks):
     scored.sort(key=lambda x: x["confidence"], reverse=True)
     return scored[0] if scored else None
 
-def detect_nutrition_region(items, image_shape, ingredient_vocab=None, debug=False):
+def detect_nutrition_region(layout_analysis, image_shape, ingredient_vocab=None, debug=False):
     """
-    Main entry point for Nutrition Facts Table region detection.
+    Main entry point for Nutrition Facts Table region detection. Supports consuming unified document layout analysis.
     """
+    # 1. Backward-compatibility / Direct call support
+    if not isinstance(layout_analysis, dict) or "section_candidates" not in layout_analysis:
+        from detection.document_layout import analyze_document
+        layout_analysis = analyze_document(layout_analysis, image_shape, ingredient_vocab)
+
     include_debug = debug or config.DEBUG_REGION_DETECTION
 
-    # 1. Reconstruct logical lines
-    lines = reconstruct_lines(items, image_shape)
+    # Find candidates from layout_analysis candidates
+    candidates = [c for c in layout_analysis["section_candidates"] if c["type"] == "nutrition"]
+    
+    # Target high-quality primary candidates first (semantic/logical blocks/clusters)
+    primary_cands = [c for c in candidates if c["final_score"] >= 0.70]
+    
+    if primary_cands:
+        best_cand = primary_cands[0]
+        # Construct winning response
+        matched_terms = set()
+        for ln in best_cand["lines"]:
+            matched_terms.update(classify_nutrition_row(ln["text"])["keyword_hits"])
+            
+        result = {
+            "bbox": best_cand["bbox"],
+            "confidence": best_cand["final_score"],
+            "anchor": None,
+            "matched_items": best_cand["lines"],
+            "matched_terms": sorted(matched_terms),
+            "method": best_cand["method"],
+            "debug": {
+                "final_score": best_cand["final_score"],
+                "semantic_score": best_cand["semantic_score"],
+                "vocabulary_score": best_cand["vocabulary_score"],
+                "heading_score": best_cand["heading_score"],
+                "spatial_score": best_cand["spatial_score"],
+                "all_candidate_scores": [
+                    {"method": c["method"], "confidence": c["final_score"]} for c in candidates
+                ]
+            }
+        }
+        # Resolve anchor text if heading matched
+        if best_cand["heading_score"] > 0.0:
+            for ln in best_cand["lines"]:
+                matched, _ = best_anchor_match(ln["text"], config.NUTRITION_ANCHORS)
+                if matched:
+                    result["anchor"] = ln["text"]
+                    break
+
+        best_bbox = validate_region(result["bbox"], image_shape)
+        result["bbox"] = best_bbox
+        
+        if not include_debug:
+            result.pop("debug", None)
+            
+        return result
+
+    # 2. Legacy fallback if no strong layout candidates found
+    lines = layout_analysis["lines"]
     if not lines:
         return {
             "bbox": None, "confidence": 0.0, "anchor": None,
@@ -423,13 +475,7 @@ def detect_nutrition_region(items, image_shape, ingredient_vocab=None, debug=Fal
     max_gap_y = line_h * config.REGION_EXPANSION_MAX_LINE_GAP_FACTOR
     band_tolerance = line_h * config.REGION_BAND_LEFT_TOLERANCE_FACTOR
 
-    # 2. Score lines semantically
-    lines = classify_lines(lines, ingredient_vocab)
-
-    # 3. Detect logical blocks
-    blocks = detect_logical_blocks(lines, image_shape, ingredient_vocab)
-
-    # 4. Heading-driven candidates
+    blocks = layout_analysis["blocks"]
     anchor_candidates = find_nutrition_anchor_candidates(lines)
     scored_candidates = []
 
@@ -457,40 +503,32 @@ def detect_nutrition_region(items, image_shape, ingredient_vocab=None, debug=Fal
             "debug": debug_info,
         })
 
-    # 5. Fallback via block detector
+    # Add other fallbacks
     block_fallback = _vocabulary_fallback_candidate_v2(blocks)
     if block_fallback is not None:
         scored_candidates.append(block_fallback)
 
-    # 6. Fallback via keyword row proximity
     fallback = detect_nutrition_rows(lines, image_shape, ingredient_vocab=ingredient_vocab)
     if fallback is not None:
         scored_candidates.append(fallback)
 
-    # 7. Fallback via spatial-semantic clustering
     spatial_candidate = _spatial_semantic_fallback_candidate_nutrition(lines, max_gap_y, band_tolerance, image_shape)
     if spatial_candidate is not None:
         scored_candidates.append(spatial_candidate)
 
     if not scored_candidates:
         return {
-            "bbox": None,
-            "confidence": 0.0,
-            "anchor": None,
-            "matched_items": [],
-            "matched_terms": [],
-            "method": "none",
+            "bbox": None, "confidence": 0.0, "anchor": None,
+            "matched_items": [], "matched_terms": [], "method": "none",
         }
 
-    # Pick the highest confidence candidate
     scored_candidates.sort(key=lambda c: c["confidence"], reverse=True)
     best = scored_candidates[0]
-
-    # Validate region coordinates
     best_bbox = validate_region(best["bbox"], image_shape)
     best["bbox"] = best_bbox
 
     if include_debug:
+        best["debug"] = best.get("debug", {})
         best["debug"]["all_candidate_scores"] = [
             {"method": c["method"], "anchor": c["anchor"], "confidence": c["confidence"]}
             for c in scored_candidates
